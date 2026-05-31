@@ -1,0 +1,82 @@
+name: Build pgvector CNPG image
+
+on:
+  workflow_dispatch:
+    inputs:
+      pgvector_version:
+        type: string
+        description: "pgvector version tag (e.g., v0.8.2)"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - pg_major: "18"
+            pg_image_tag: "18.4"
+            distro: "trixie"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get latest pgvector release
+        id: latest
+        run: |
+          tag=${{ inputs.pgvector_version }}
+          if [ -z "$tag" ]; then
+            tag=$(curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/pgvector/pgvector/tags?per_page=1" \
+              | jq -r '.[0].name')
+          fi
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          # Strip leading 'v' for use as a clean image tag (e.g. v0.8.2 → 0.8.2)
+          echo "version=${tag#v}" >> $GITHUB_OUTPUT
+          echo "pgvector version: $tag"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.latest.outputs.version }}-pg${{ matrix.pg_major }}
+            type=raw,value=pg${{ matrix.pg_major }}
+            type=sha,prefix=pg${{ matrix.pg_major }}-
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PG_MAJOR=${{ matrix.pg_major }}
+            PG_IMAGE_TAG=${{ matrix.pg_image_tag }}
+            DISTRO=${{ matrix.distro }}
